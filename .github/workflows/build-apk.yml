@@ -1,0 +1,100 @@
+name: Build USE VISION AI APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Build Web App & Initialize Android
+        run: |
+          npm install --legacy-peer-deps
+          npm run build
+          npm install --no-save --legacy-peer-deps @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6
+          rm -f capacitor.config.ts
+          node -e '
+            const fs = require("fs");
+            fs.writeFileSync("capacitor.config.json", JSON.stringify({
+              appId: "com.usevision.ai",
+              appName: "USE VISION AI",
+              webDir: "dist",
+              server: {
+                url: "https://ais-pre-a2o4i73vi4ak7o7byjz24u-820329007799.asia-northeast1.run.app",
+                androidScheme: "https",
+                cleartext: true
+              },
+              android: {
+                allowMixedContent: true,
+                captureInput: true
+              }
+            }, null, 2));
+          '
+          npx cap add android
+          node -e '
+            const fs = require("fs");
+            const p = "android/app/src/main/AndroidManifest.xml";
+            let m = fs.readFileSync(p, "utf8");
+            const perms = [
+              "android.permission.CAMERA",
+              "android.permission.RECORD_AUDIO",
+              "android.permission.MODIFY_AUDIO_SETTINGS",
+              "android.permission.ACCESS_FINE_LOCATION",
+              "android.permission.BLUETOOTH_SCAN",
+              "android.permission.BLUETOOTH_CONNECT"
+            ].filter(x => !m.includes(x)).map(x => `    <uses-permission android:name="${x}" />`).join("\n");
+            if (perms) m = m.replace("<application", perms + "\n    <application");
+            if (!m.includes("usesCleartextTraffic")) {
+              m = m.replace("<application", "<application\n        android:usesCleartextTraffic=\"true\"");
+            }
+            fs.writeFileSync(p, m);
+          '
+          npx cap sync android
+
+      - name: Build Debug APK
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Upload Actions Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: Publish APK to GitHub Releases
+        id: publish_release
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ASSET_DIR="${{ runner.temp }}/release"
+          mkdir -p "$ASSET_DIR"
+          ASSET="$ASSET_DIR/use-vision-ai-debug-${{ github.run_number }}.apk"
+          cp android/app/build/outputs/apk/debug/app-debug.apk "$ASSET"
+          TAG="debug-apk-build-${{ github.run_number }}-${{ github.run_attempt }}"
+          gh release create "$TAG" "$ASSET" \
+            --target "${{ github.sha }}" \
+            --title "Debug APK Build #${{ github.run_number }}" \
+            --notes "Automatically built debug APK by GitHub Actions (Run #${{ github.run_number }})." \
+            --latest
