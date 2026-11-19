@@ -38,13 +38,17 @@ jobs:
               appName: "USE VISION AI",
               webDir: "dist",
               server: {
-                url: "https://ais-pre-a2o4i73vi4ak7o7byjz24u-820329007799.asia-northeast1.run.app",
-                androidScheme: "https",
+                androidScheme: "http",
                 cleartext: true
               },
               android: {
                 allowMixedContent: true,
                 captureInput: true
+              },
+              plugins: {
+                CapacitorHttp: {
+                  enabled: true
+                }
               }
             }, null, 2));
           '
@@ -96,5 +100,5 @@ jobs:
           gh release create "$TAG" "$ASSET" \
             --target "${{ github.sha }}" \
             --title "Debug APK Build #${{ github.run_number }}" \
-            --notes "Automatically built debug APK by GitHub Actions (Run #${{ github.run_number }})." \
+            --notes "Standalone debug APK built by GitHub Actions (Run #${{ github.run_number }})." \
             --latest
