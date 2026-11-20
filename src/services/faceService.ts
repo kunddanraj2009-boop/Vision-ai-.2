@@ -132,7 +132,7 @@ class FaceIntelligenceManager {
       try {
         this.wasmCache = await this.withTimeout(
           FilesetResolver.forVisionTasks('/mediapipe-wasm'),
-          6000,
+          12000,
           'Face WASM resolver'
         );
         return this.wasmCache;
@@ -142,7 +142,7 @@ class FaceIntelligenceManager {
       FilesetResolver.forVisionTasks(
         'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm'
       ),
-      10000,
+      30000,
       'Face CDN WASM resolver'
     );
     return this.wasmCache;
@@ -178,7 +178,7 @@ class FaceIntelligenceManager {
           this.resolvedModelPath = localModelUrl;
         } catch {
           try {
-            modelBytes = await this.fetchModelBuffer(remoteModelUrl, 12000);
+            modelBytes = await this.fetchModelBuffer(remoteModelUrl, 30000);
             this.resolvedModelPath = remoteModelUrl;
           } catch {
             modelBytes = null;

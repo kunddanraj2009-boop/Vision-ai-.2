@@ -28,6 +28,14 @@ jobs:
       - name: Build Web App & Initialize Android
         run: |
           npm install --legacy-peer-deps
+          mkdir -p public/mediapipe-wasm public/api/models/mediapipe public/api/models/coco-ssd/ssdlite_mobilenet_v2
+          cp node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_internal.js public/mediapipe-wasm/
+          cp node_modules/@mediapipe/tasks-vision/wasm/vision_wasm_internal.wasm public/mediapipe-wasm/
+          curl -fsSL "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task" -o public/api/models/mediapipe/face_landmarker.task
+          curl -fsSL "https://storage.googleapis.com/mediapipe-models/gesture_recognizer/gesture_recognizer/float16/1/gesture_recognizer.task" -o public/api/models/mediapipe/gesture_recognizer.task
+          for f in model.json group1-shard1of5 group1-shard2of5 group1-shard3of5 group1-shard4of5 group1-shard5of5; do
+            curl -fsSL "https://storage.googleapis.com/tfjs-models/savedmodel/ssdlite_mobilenet_v2/$f" -o "public/api/models/coco-ssd/ssdlite_mobilenet_v2/$f"
+          done
           npm run build
           npm install --no-save --legacy-peer-deps @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6
           rm -f capacitor.config.ts
@@ -61,6 +69,15 @@ jobs:
               "android.permission.BLUETOOTH_CONNECT"
             ].filter(x => !m.includes(x)).map(x => `    <uses-permission android:name="${x}" />`).join("\n");
             if (perms) m = m.replace("<application", perms + "\n    <application");
+            if (!m.includes("TTS_SERVICE")) {
+              const q = [
+                "    <queries>",
+                "        <intent><action android:name=\"android.intent.action.TTS_SERVICE\" /></intent>",
+                "        <intent><action android:name=\"android.speech.RecognitionService\" /></intent>",
+                "    </queries>"
+              ].join("\n");
+              m = m.replace("<application", q + "\n    <application");
+            }
             if (!m.includes("usesCleartextTraffic")) {
               m = m.replace("<application", "<application\n        android:usesCleartextTraffic=\"true\"");
             }

@@ -294,35 +294,65 @@ class CocoSsdManager {
       try {
         await this.withTimeout(this.ensureBackendsReady(), 6000, 'TF.js backend');
 
+        const isLocalModelJsonAvailable = async (modelDir: string): Promise<boolean> => {
+          try {
+            const ctrl = new AbortController();
+            const timer = setTimeout(() => ctrl.abort(), 1800);
+            const res = await fetch(`${window.location.origin}/api/models/coco-ssd/${modelDir}/model.json`, {
+              signal: ctrl.signal,
+            });
+            clearTimeout(timer);
+            if (!res.ok) return false;
+            const ctype = (res.headers.get('content-type') || '').toLowerCase();
+            if (ctype.includes('text/html')) return false;
+            const json = await res.json();
+            return Boolean(json && Array.isArray(json.weightsManifest));
+          } catch {
+            return false;
+          }
+        };
+
         const loadWithBase = async (targetBase: CocoBaseModel) => {
           const modelDir =
             targetBase === 'lite_mobilenet_v2' ? 'ssdlite_mobilenet_v2' : 'ssd_mobilenet_v2';
           const proxyUrl = `${window.location.origin}/api/models/coco-ssd/${modelDir}/model.json`;
-          try {
-            console.log(`[COCO-SSD] Loading ${targetBase} via local proxy on ${this.backendName}...`);
-            return await this.withTimeout(
-              cocoSsd.load({ base: targetBase, modelUrl: proxyUrl }),
-              18000,
-              `COCO-SSD proxy (${targetBase})`
-            );
-          } catch (proxyErr: any) {
-            console.warn(
-              `[COCO-SSD] Local proxy load failed/timed out for ${targetBase}, trying direct CDN:`,
-              proxyErr?.message || proxyErr
-            );
-            return await this.withTimeout(
-              cocoSsd.load({ base: targetBase }),
-              18000,
-              `COCO-SSD direct (${targetBase})`
-            );
+          if (await isLocalModelJsonAvailable(modelDir)) {
+            try {
+              console.log(`[COCO-SSD] Loading ${targetBase} via local assets on ${this.backendName}...`);
+              return await this.withTimeout(
+                cocoSsd.load({ base: targetBase, modelUrl: proxyUrl }),
+                20000,
+                `COCO-SSD local (${targetBase})`
+              );
+            } catch (proxyErr: any) {
+              console.warn(
+                `[COCO-SSD] Local load failed for ${targetBase}, trying direct CDN:`,
+                proxyErr?.message || proxyErr
+              );
+            }
           }
+          return await this.withTimeout(
+            cocoSsd.load({ base: targetBase }),
+            35000,
+            `COCO-SSD direct (${targetBase})`
+          );
         };
+
+        let effectiveBase: CocoBaseModel = base;
+        if (base === 'mobilenet_v2') {
+          const hasFullLocal = await isLocalModelJsonAvailable('ssd_mobilenet_v2');
+          const hasLiteLocal = await isLocalModelJsonAvailable('ssdlite_mobilenet_v2');
+          if (!hasFullLocal && hasLiteLocal) {
+            effectiveBase = 'lite_mobilenet_v2';
+            this.currentBase = 'lite_mobilenet_v2';
+          }
+        }
 
         let loaded: any = null;
         try {
-          loaded = await loadWithBase(base);
+          loaded = await loadWithBase(effectiveBase);
         } catch (primaryErr) {
-          if (base !== 'lite_mobilenet_v2') {
+          if (effectiveBase !== 'lite_mobilenet_v2') {
             console.warn('[COCO-SSD] Full mobilenet_v2 timed out/failed, falling back to fast lite_mobilenet_v2');
             this.currentBase = 'lite_mobilenet_v2';
             loaded = await loadWithBase('lite_mobilenet_v2');

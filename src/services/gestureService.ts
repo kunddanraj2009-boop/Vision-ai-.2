@@ -273,7 +273,7 @@ class GestureRecognitionManager {
           try {
             visionWasm = await this.withTimeout(
               FilesetResolver.forVisionTasks('/mediapipe-wasm'),
-              6000,
+              12000,
               'WASM resolver'
             );
           } catch {
@@ -285,7 +285,7 @@ class GestureRecognitionManager {
             FilesetResolver.forVisionTasks(
               'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm'
             ),
-            10000,
+            30000,
             'CDN WASM resolver'
           );
         }
@@ -299,7 +299,7 @@ class GestureRecognitionManager {
           modelBytes = await this.fetchModelBuffer(localModelUrl, 12000);
         } catch {
           try {
-            modelBytes = await this.fetchModelBuffer(remoteModelUrl, 12000);
+            modelBytes = await this.fetchModelBuffer(remoteModelUrl, 30000);
           } catch {
             modelBytes = null;
           }
