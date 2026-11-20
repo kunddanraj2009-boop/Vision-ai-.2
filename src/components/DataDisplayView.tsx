@@ -278,6 +278,24 @@ export const DataDisplayView: React.FC<DataDisplayViewProps> = ({
             </button>
           </form>
 
+          {(() => {
+            const env = hardwareService.getRuntimeEnvironmentInfo();
+            return (
+              <div className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-slate-950/70 border border-slate-800/90 text-[10px] font-mono-cyber">
+                <span className={env.isApk ? 'text-emerald-400' : 'text-amber-300'}>
+                  {env.isApk
+                    ? env.hasCapacitorHttp
+                      ? 'APK NATIVE HTTP READY'
+                      : 'ANDROID APK WEBVIEW'
+                    : env.isHttps
+                    ? 'HTTPS BROWSER (LAN HTTP BLOCKED BY CHROME)'
+                    : 'HTTP BROWSER'}
+                </span>
+                <span className="text-slate-500">{env.buildTag}</span>
+              </div>
+            );
+          })()}
+
           {feedback && (
             <div
               className={`p-3 rounded-xl border text-[11px] font-mono-cyber flex items-start space-x-2 ${

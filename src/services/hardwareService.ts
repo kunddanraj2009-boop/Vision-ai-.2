@@ -55,7 +55,7 @@ class HardwareService {
   private realSensorsInitialized = false;
   private activeWifiEndpoint = '/sensors';
   private activeWifiProtocol: 'http' | 'https' = 'http';
-  private activeWifiTransport: 'direct_http' | 'direct_ws' | 'server_proxy' | 'none' = 'none';
+  private activeWifiTransport: 'direct_http' | 'direct_ws' | 'server_proxy' | 'capacitor_http' | 'none' = 'none';
   private wifiConsecutiveFailures = 0;
 
   constructor() {
@@ -576,8 +576,73 @@ class HardwareService {
     return false;
   }
 
+  private getCapacitorHttp(): { request: (opts: any) => Promise<{ status: number; data: any }> } | null {
+    if (typeof window === 'undefined') return null;
+    const cap = (window as any).Capacitor;
+    const http = cap?.Plugins?.CapacitorHttp;
+    if (http && typeof http.request === 'function') {
+      return http;
+    }
+    return null;
+  }
+
+  public isAndroidApkRuntime(): boolean {
+    if (typeof window === 'undefined') return false;
+    const cap = (window as any).Capacitor;
+    if (cap?.isNativePlatform?.() || cap?.Plugins?.CapacitorHttp || (window as any).androidBridge) {
+      return true;
+    }
+    if (typeof document !== 'undefined' && document.referrer.startsWith('android-app://')) {
+      return true;
+    }
+    return typeof navigator !== 'undefined' && /;\s*wv\)/.test(navigator.userAgent);
+  }
+
+  public getRuntimeEnvironmentInfo(): {
+    isApk: boolean;
+    hasCapacitorHttp: boolean;
+    isHttps: boolean;
+    buildTag: string;
+  } {
+    const isHttps = typeof window !== 'undefined' && window.location.protocol === 'https:';
+    return {
+      isApk: this.isAndroidApkRuntime(),
+      hasCapacitorHttp: Boolean(this.getCapacitorHttp()),
+      isHttps,
+      buildTag: 'v2.6-lan',
+    };
+  }
+
   private async pollWifiControllerOnce(ip: string, port: number, endpoint: string): Promise<boolean> {
     const started = performance.now();
+
+    if (this.activeWifiTransport === 'capacitor_http') {
+      const capHttp = this.getCapacitorHttp();
+      if (!capHttp) return false;
+      try {
+        const res = await capHttp.request({
+          method: 'GET',
+          url: `${this.activeWifiProtocol}://${ip}:${port}${endpoint}`,
+          connectTimeout: 2500,
+          readTimeout: 2500,
+          headers: { Accept: 'application/json, text/plain, */*' },
+        });
+        if (res.status < 200 || res.status >= 300) {
+          this.wifiConsecutiveFailures += 1;
+          return false;
+        }
+        const latencyMs = Math.max(1, Math.round(performance.now() - started));
+        const text = (typeof res.data === 'string' ? res.data : JSON.stringify(res.data ?? '')).trim();
+        if (text && this.isValidControllerPayload(text)) {
+          this.parsePhysicalHardwarePacket(text, latencyMs);
+        }
+        this.wifiConsecutiveFailures = 0;
+        return true;
+      } catch {
+        this.wifiConsecutiveFailures += 1;
+        return false;
+      }
+    }
 
     if (this.activeWifiTransport === 'server_proxy') {
       try {
@@ -651,7 +716,7 @@ class HardwareService {
     port: number,
     endpoint: string,
     protocol: 'http' | 'https' = 'http',
-    transport: 'direct_http' | 'server_proxy' = 'direct_http'
+    transport: 'direct_http' | 'server_proxy' | 'capacitor_http' = 'direct_http'
   ) {
     this.stopWifiPolling();
     this.activeWifiEndpoint = endpoint;
@@ -751,21 +816,85 @@ class HardwareService {
 
     const isHttpsPage = typeof window !== 'undefined' && window.location.protocol === 'https:';
     const isPrivateIp = this.isPrivateIpAddress(ip);
+    const isApkRuntime = this.isAndroidApkRuntime();
+    const capHttp = this.getCapacitorHttp();
     let corsSuspected = false;
     let mixedContentBlocked = false;
+    let nativeNetworkError = '';
 
     this.emitLog(`Connecting to controller at ${ip}:${port}...`);
 
     const schemes: Array<'http' | 'https'> =
       explicitProtocol === 'https' || port === 443 || port === 8443
         ? ['https', 'http']
-        : isHttpsPage
-        ? ['https', 'http']
-        : ['http', 'https'];
+        : isApkRuntime || !isHttpsPage
+        ? ['http', 'https']
+        : ['https', 'http'];
 
     const candidateEndpoints = Array.from(
       new Set([pathSuffix && pathSuffix !== '/' ? pathSuffix : null, '/sensors', '/data', '/status', '/api/sensors', '/'].filter(Boolean) as string[])
     );
+
+    // 0. Native Android APK CapacitorHttp (Bypasses WebView Mixed Content & CORS completely)
+    if (capHttp) {
+      for (const scheme of schemes) {
+        let schemeNetworkFailed = false;
+        for (const endpoint of candidateEndpoints) {
+          if (schemeNetworkFailed) break;
+          const started = performance.now();
+          try {
+            const res = await capHttp.request({
+              method: 'GET',
+              url: `${scheme}://${ip}:${port}${endpoint}`,
+              connectTimeout: 2500,
+              readTimeout: 2500,
+              headers: { Accept: 'application/json, text/plain, */*' },
+            });
+
+            if (res.status >= 200 && res.status < 300) {
+              const latencyMs = Math.max(1, Math.round(performance.now() - started));
+              const rawText = (typeof res.data === 'string' ? res.data : JSON.stringify(res.data ?? '')).trim();
+              if (rawText.toLowerCase().includes('use vision ai')) {
+                continue;
+              }
+
+              this.state = {
+                ...this.state,
+                type: 'esp32_wifi',
+                isConnected: true,
+                deviceIp: ip,
+                devicePort: port,
+                deviceName: `ESP32 / Controller (${ip})`,
+                isSimulated: false,
+                connectionMode: 'physical_board',
+              };
+              this.sensorData.dataSource = 'esp32_hardware';
+              this.sensorData.isSimulated = false;
+              this.sensorData.controllerPackets = 0;
+              this.sensorData.controllerLatencyMs = latencyMs;
+              this.sensorData.networkLatency = latencyMs;
+              this.sensorData.lastUpdated = new Date().toLocaleTimeString();
+
+              if (rawText && this.isValidControllerPayload(rawText)) {
+                this.parsePhysicalHardwarePacket(rawText, latencyMs);
+              } else {
+                this.notifyTelemetry();
+              }
+
+              this.startWifiPolling(ip, port, endpoint, scheme, 'capacitor_http');
+              this.emitLog(`Native Android HTTP connected to ${ip}:${port}${endpoint} (${latencyMs}ms).`);
+              return {
+                success: true,
+                message: `Connected natively via Android APK to ${ip}:${port}${endpoint} (${latencyMs}ms).`,
+              };
+            }
+          } catch (err: any) {
+            schemeNetworkFailed = true;
+            nativeNetworkError = String(err?.message || err || '');
+          }
+        }
+      }
+    }
 
     // 1. Try Direct Browser HTTP / HTTPS
     for (const scheme of schemes) {
@@ -821,11 +950,9 @@ class HardwareService {
           schemeNetworkFailed = true;
           const elapsed = performance.now() - started;
 
-          // Check if browser blocked http:// from https:// page (instant failure < 350ms on HTTPS origin)
-          if (scheme === 'http' && isHttpsPage && err?.name !== 'AbortError' && elapsed < 350) {
-            mixedContentBlocked = true;
-          } else if (err?.name !== 'AbortError') {
-            // Probe with no-cors ONLY to detect whether the IP actually responded (CORS missing vs truly offline)
+          if (err?.name !== 'AbortError') {
+            // Probe with no-cors ONLY to test whether the IP actually responded (CORS missing vs Mixed Content / offline)
+            let noCorsResponded = false;
             try {
               const ncCtrl = new AbortController();
               const ncTimer = setTimeout(() => ncCtrl.abort(), 1200);
@@ -836,9 +963,15 @@ class HardwareService {
                 cache: 'no-store',
               });
               clearTimeout(ncTimer);
+              noCorsResponded = true;
+            } catch {}
+
+            if (noCorsResponded) {
               corsSuspected = true;
               mixedContentBlocked = false;
-            } catch {}
+            } else if (scheme === 'http' && isHttpsPage && !isApkRuntime && elapsed < 350) {
+              mixedContentBlocked = true;
+            }
           }
         }
       }
@@ -849,9 +982,9 @@ class HardwareService {
     const wsSchemes: Array<'wss' | 'ws'> =
       explicitProtocol === 'https' || port === 443 || port === 8443
         ? ['wss', 'ws']
-        : isHttpsPage
-        ? ['wss', 'ws']
-        : ['ws', 'wss'];
+        : isApkRuntime || !isHttpsPage
+        ? ['ws', 'wss']
+        : ['wss', 'ws'];
 
     for (const wsScheme of wsSchemes) {
       wsCandidates.push(`${wsScheme}://${ip}:${port}/ws`);
@@ -863,7 +996,7 @@ class HardwareService {
 
     for (const wsUrl of wsCandidates) {
       const wsAttempt = await this.tryWebSocketUrl(wsUrl, 1600);
-      if (wsAttempt.securityBlocked) {
+      if (wsAttempt.securityBlocked && !isApkRuntime) {
         mixedContentBlocked = true;
         continue;
       }
@@ -966,8 +1099,8 @@ class HardwareService {
 
         // Handle accurate failure diagnostics from backend proxy
         if (proxyData.reason === 'private_lan_from_cloud') {
-          if (mixedContentBlocked || (isHttpsPage && isPrivateIp)) {
-            const msg = `Browser blocked local IP ${ip}:${port} (HTTPS Mixed Content). Open Chrome Site Settings (🔒) -> "Insecure content: Allow", use the Android APK, or expose your device over HTTPS/public IP.`;
+          if (!isApkRuntime && (mixedContentBlocked || (isHttpsPage && isPrivateIp))) {
+            const msg = `Browser blocked local IP ${ip}:${port} (HTTPS Mixed Content). Use the Android APK, allow "Insecure content" in Desktop Chrome Site Settings (🔒), or expose your device via HTTPS tunnel.`;
             this.emitLog(msg);
             return {
               success: false,
@@ -1011,8 +1144,22 @@ class HardwareService {
       };
     }
 
-    if (mixedContentBlocked || (isHttpsPage && isPrivateIp)) {
-      const msg = `Browser blocked local WiFi IP ${ip}:${port} from HTTPS page (Mixed Content). Allow "Insecure content" in Chrome Site Settings (🔒), use Android APK, or connect via public HTTPS tunnel.`;
+    if (nativeNetworkError) {
+      const low = nativeNetworkError.toLowerCase();
+      if (low.includes('econnrefused') || low.includes('failed to connect') || low.includes('refused')) {
+        const msg = `Host ${ip} is reachable, but port ${port} refused connection (no HTTP/ESP32 server running on port ${port}).`;
+        this.emitLog(msg);
+        return { success: false, reason: 'connection_refused', message: msg };
+      }
+      if (low.includes('timeout') || low.includes('timed out')) {
+        const msg = `Timed out connecting to ${ip}:${port} — check that both devices are on the same Wi-Fi/Hotspot and device is powered on.`;
+        this.emitLog(msg);
+        return { success: false, reason: 'timeout', message: msg };
+      }
+    }
+
+    if (!isApkRuntime && (mixedContentBlocked || (isHttpsPage && isPrivateIp))) {
+      const msg = `Browser blocked local WiFi IP ${ip}:${port} from HTTPS page (Mixed Content). Use the Android APK, allow "Insecure content" in Chrome Site Settings (🔒), or use an HTTPS tunnel.`;
       this.emitLog(msg);
       return {
         success: false,
@@ -1021,7 +1168,7 @@ class HardwareService {
       };
     }
 
-    const fallbackMsg = `Could not connect to ${ip}:${port} — verify device power, port ${port}, firewall, and network reachability.`;
+    const fallbackMsg = `Could not reach ${ip}:${port} on local network — verify device power, same Wi-Fi/Hotspot, and that port ${port} is open.`;
     this.emitLog(fallbackMsg);
     return {
       success: false,
@@ -1163,7 +1310,32 @@ class HardwareService {
       } catch {}
     }
 
-    // 3. Direct Browser HTTP/HTTPS LAN dispatch to connected ESP32 IP
+    // 3. Native Android APK CapacitorHttp command dispatch
+    if (
+      this.state.type === 'esp32_wifi' &&
+      this.state.isConnected &&
+      this.state.deviceIp &&
+      this.activeWifiTransport === 'capacitor_http'
+    ) {
+      const capHttp = this.getCapacitorHttp();
+      if (capHttp) {
+        try {
+          const port = this.state.devicePort || 80;
+          await capHttp.request({
+            method: 'POST',
+            url: `${this.activeWifiProtocol}://${this.state.deviceIp}:${port}/command`,
+            headers: { 'Content-Type': 'application/json' },
+            data: { command: cmd, params },
+            connectTimeout: 1800,
+            readTimeout: 1800,
+          });
+          this.emitLog(`[APK HTTP TX] >> ${cmd} -> ${this.state.deviceIp}:${port}`);
+          return;
+        } catch {}
+      }
+    }
+
+    // 4. Direct Browser HTTP/HTTPS LAN dispatch to connected ESP32 IP
     if (
       this.state.type === 'esp32_wifi' &&
       this.state.isConnected &&
@@ -1186,7 +1358,7 @@ class HardwareService {
       } catch {}
     }
 
-    // 4. Server-Side Proxy Relay
+    // 5. Server-Side Proxy Relay
     try {
       await fetch('/api/hardware/command', {
         method: 'POST',
