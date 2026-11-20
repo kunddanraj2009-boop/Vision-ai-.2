@@ -13,7 +13,7 @@ import {
   UserProfile,
 } from './types/nancy';
 import { speechService, SpeechState } from './services/speechService';
-import { hardwareService } from './services/hardwareService';
+import { hardwareService, HardwarePushButtonNumber } from './services/hardwareService';
 import { storageService, AppSettings } from './services/storageService';
 import { playAudioFx } from './services/audioSynth';
 
@@ -48,6 +48,9 @@ import {
   ChevronRight,
   Volume2,
   Zap,
+  Mic,
+  ShieldCheck,
+  Siren,
 } from 'lucide-react';
 
 export default function App() {
@@ -83,7 +86,9 @@ export default function App() {
   const lastCommandTextRef = useRef('');
   const lastCommandTimeRef = useRef(0);
 
-  // Subscribe to Telemetry
+  const [pushBtnFeedback, setPushBtnFeedback] = useState<string | null>(null);
+
+  // Subscribe to Telemetry & Physical Push Buttons (Btn 1 = Voice ON, Btn 2 = Permission, Btn 3 = Alert)
   useEffect(() => {
     const unsubTelemetry = hardwareService.subscribeTelemetry((data) => {
       setSensorData(data);
@@ -107,8 +112,13 @@ export default function App() {
       }
     });
 
+    const unsubButtons = hardwareService.subscribePushButtons((btn, source) => {
+      void handlePushButtonAction(btn, source);
+    });
+
     return () => {
       unsubTelemetry();
+      unsubButtons();
     };
   }, []);
 
@@ -207,6 +217,114 @@ export default function App() {
       category: 'hardware',
       status: 'warning',
     });
+  };
+
+  // 3-Push Button System Handler (Button 1: Voice ON, Button 2: Permission, Button 3: Alert)
+  const handlePushButtonAction = async (btn: HardwarePushButtonNumber, source: 'hardware' | 'ui' = 'ui') => {
+    const isHi = storageService.getSettings().language === 'hi';
+    const srcTag = source === 'hardware' ? 'ESP32' : 'APP';
+
+    if (btn === 1) {
+      playAudioFx.wakeChime();
+      setPushBtnFeedback(
+        isHi ? `[BTN 1 • ${srcTag}] वॉइस चालू हो रहा है...` : `[BTN 1 • ${srcTag}] Voice ON activated...`
+      );
+      storageService.logActivity({
+        title: 'Push Button 1: Voice ON',
+        detail: `Voice assistant listening triggered (${srcTag}).`,
+        category: 'voice',
+        status: 'success',
+      });
+      setAssistantState('listening');
+      const msg = isHi ? 'वॉइस चालू हो गया है, बोलिए।' : 'Voice activated. I am listening.';
+      void speechService.speak(msg, () => {
+        speechService.startListening();
+      });
+      return;
+    }
+
+    if (btn === 2) {
+      playAudioFx.acknowledge();
+      setPushBtnFeedback(
+        isHi
+          ? `[BTN 2 • ${srcTag}] कैमरा, माइक और लोकेशन परमिशन जाँच हो रही है...`
+          : `[BTN 2 • ${srcTag}] Checking Camera, Mic & Location permissions...`
+      );
+      const grantedList: string[] = [];
+      try {
+        if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+          const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+          stream.getTracks().forEach((t) => t.stop());
+          grantedList.push(isHi ? 'कैमरा व माइक' : 'Camera & Mic');
+        }
+      } catch {
+        // Check individual permissions if combined failed
+        try {
+          const sCam = await navigator.mediaDevices?.getUserMedia({ video: true });
+          sCam?.getTracks().forEach((t) => t.stop());
+          grantedList.push(isHi ? 'कैमरा' : 'Camera');
+        } catch {}
+        try {
+          const sMic = await navigator.mediaDevices?.getUserMedia({ audio: true });
+          sMic?.getTracks().forEach((t) => t.stop());
+          grantedList.push(isHi ? 'माइक' : 'Mic');
+        } catch {}
+      }
+
+      if (navigator.geolocation) {
+        await new Promise<void>((resolve) => {
+          navigator.geolocation.getCurrentPosition(
+            () => {
+              grantedList.push(isHi ? 'लोकेशन' : 'Location');
+              resolve();
+            },
+            () => resolve(),
+            { timeout: 3500 }
+          );
+        });
+      }
+
+      const summary =
+        grantedList.length > 0
+          ? isHi
+            ? `परमिशन मिल गई: ${grantedList.join(', ')}।`
+            : `Permissions enabled: ${grantedList.join(', ')}.`
+          : isHi
+          ? 'परमिशन नहीं मिली। कृपया फोन सेटिंग से कैमरा और माइक Allow करें।'
+          : 'Permissions denied. Please allow Camera and Microphone in app settings.';
+
+      setPushBtnFeedback(`[BTN 2 • ${srcTag}] ${summary}`);
+      storageService.logActivity({
+        title: 'Push Button 2: Permission Check',
+        detail: summary,
+        category: 'system',
+        status: grantedList.length > 0 ? 'success' : 'warning',
+      });
+      void speechService.speak(summary);
+      return;
+    }
+
+    if (btn === 3) {
+      playAudioFx.alertSiren();
+      setAssistantState('alert');
+      void hardwareService.triggerBuzzer(1500);
+      triggerSystemAlert(
+        'Push Button 3 Emergency Alert',
+        isHi ? 'पुश बटन 3 से इमरजेंसी अलर्ट बजाया गया है!' : 'Emergency / Obstacle SOS Alert triggered via Push Button 3.',
+        'critical'
+      );
+      setPushBtnFeedback(
+        isHi
+          ? `[BTN 3 • ${srcTag}] इमरजेंसी अलर्ट सक्रिय!`
+          : `[BTN 3 • ${srcTag}] EMERGENCY ALERT ACTIVATED!`
+      );
+      const alertMsg = isHi
+        ? 'सावधान! इमरजेंसी अलर्ट सक्रिय किया गया है!'
+        : 'Alert! Emergency alert has been activated!';
+      void speechService.speak(alertMsg, () => {
+        setAssistantState('idle');
+      });
+    }
   };
 
   // Central Command Processor
@@ -684,7 +802,63 @@ export default function App() {
               onQuickCommand={handleExecuteVoiceCommand}
             />
 
+            {/* 3-PUSH BUTTON ACCESSIBILITY & ESP32 CONTROL STRIP */}
+            <div className="w-full max-w-xl mb-3 p-3 rounded-2xl bg-slate-900/85 border border-cyan-500/30 space-y-2 shadow-md">
+              <div className="flex items-center justify-between px-0.5">
+                <span className="font-cyber font-bold text-[11px] text-cyan-300 tracking-wider">
+                  {settings.language === 'hi'
+                    ? '3-पुश बटन कंट्रोल (ESP32 + ऐप)'
+                    : '3-PUSH BUTTON SYSTEM (ESP32 + APP)'}
+                </span>
+                <span className="text-[9px] font-mono-cyber text-slate-400">
+                  BTN 1 • BTN 2 • BTN 3
+                </span>
+              </div>
 
+              <div className="grid grid-cols-3 gap-2">
+                <button
+                  type="button"
+                  onClick={() => hardwareService.triggerPushButton(1, 'ui')}
+                  className="py-2.5 px-2 rounded-xl bg-emerald-950/70 hover:bg-emerald-900/80 active:scale-95 border border-emerald-500/50 text-emerald-200 flex flex-col items-center justify-center space-y-1 transition-all cursor-pointer"
+                >
+                  <Mic className="w-4 h-4 text-emerald-400" />
+                  <span className="font-cyber font-bold text-[10px]">BTN 1</span>
+                  <span className="text-[9px] font-mono-cyber text-emerald-300">
+                    {settings.language === 'hi' ? 'वॉइस ON' : 'VOICE ON'}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => hardwareService.triggerPushButton(2, 'ui')}
+                  className="py-2.5 px-2 rounded-xl bg-sky-950/70 hover:bg-sky-900/80 active:scale-95 border border-sky-500/50 text-sky-200 flex flex-col items-center justify-center space-y-1 transition-all cursor-pointer"
+                >
+                  <ShieldCheck className="w-4 h-4 text-sky-400" />
+                  <span className="font-cyber font-bold text-[10px]">BTN 2</span>
+                  <span className="text-[9px] font-mono-cyber text-sky-300">
+                    {settings.language === 'hi' ? 'परमिशन' : 'PERMISSION'}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => hardwareService.triggerPushButton(3, 'ui')}
+                  className="py-2.5 px-2 rounded-xl bg-rose-950/75 hover:bg-rose-900/85 active:scale-95 border border-rose-500/60 text-rose-200 flex flex-col items-center justify-center space-y-1 transition-all cursor-pointer"
+                >
+                  <Siren className="w-4 h-4 text-rose-400" />
+                  <span className="font-cyber font-bold text-[10px]">BTN 3</span>
+                  <span className="text-[9px] font-mono-cyber text-rose-300">
+                    {settings.language === 'hi' ? 'अलर्ट' : 'ALERT'}
+                  </span>
+                </button>
+              </div>
+
+              {pushBtnFeedback && (
+                <div className="px-2.5 py-1.5 rounded-lg bg-slate-950/90 border border-slate-800 text-[10px] font-mono-cyber text-cyan-200">
+                  {pushBtnFeedback}
+                </div>
+              )}
+            </div>
 
             {/* ORGANIZED HOME DASHBOARD MODULE BLOCKS */}
             <div className="w-full max-w-xl space-y-3">

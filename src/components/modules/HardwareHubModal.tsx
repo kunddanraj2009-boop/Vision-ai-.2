@@ -124,13 +124,27 @@ export const HardwareHubModal: React.FC<HardwareHubModalProps> = ({
     setCustomCmd('');
   };
 
-  const arduinoSketchCode = `// USE VISION AI - ESP32 WiFi + CORS WebServer + Serial Firmware
+  const arduinoSketchCode = `// USE VISION AI - ESP32 WiFi + 3-Push Button System + CORS WebServer
+// Wiring (Active LOW to GND with INPUT_PULLUP):
+//   Push Button 1 (Voice ON)   -> GPIO 12 & GND
+//   Push Button 2 (Permission) -> GPIO 13 & GND
+//   Push Button 3 (Alert SOS)  -> GPIO 14 & GND
+//   Buzzer / Alert LED         -> GPIO 2
 #include <WiFi.h>
 #include <WebServer.h>
 
 const char* ssid = "YOUR_WIFI_NAME";
 const char* password = "YOUR_WIFI_PASSWORD";
-WebServer server(80);
+WebServer server(80); // Port yahan se change kar sakte hain (e.g. 8080)
+
+#define BTN1_PIN 12
+#define BTN2_PIN 13
+#define BTN3_PIN 14
+#define BUZZER_PIN 2
+
+unsigned long btn1LatchUntil = 0;
+unsigned long btn2LatchUntil = 0;
+unsigned long btn3LatchUntil = 0;
 
 void sendCorsHeaders() {
   server.sendHeader("Access-Control-Allow-Origin", "*");
@@ -140,12 +154,18 @@ void sendCorsHeaders() {
 
 void handleSensors() {
   sendCorsHeaders();
-  float temp = 25.4; // replace with real sensor reading
+  unsigned long now = millis();
+  int b1 = (digitalRead(BTN1_PIN) == LOW || now < btn1LatchUntil) ? 1 : 0;
+  int b2 = (digitalRead(BTN2_PIN) == LOW || now < btn2LatchUntil) ? 1 : 0;
+  int b3 = (digitalRead(BTN3_PIN) == LOW || now < btn3LatchUntil) ? 1 : 0;
+  float temp = 25.4;
   float hum = 52.0;
   int dist = 38;
   int ldr = analogRead(34);
   String json = "{\\"temp\\":" + String(temp) + ",\\"hum\\":" + String(hum) +
-                ",\\"dist\\":" + String(dist) + ",\\"light\\":" + String(ldr) + "}";
+                ",\\"dist\\":" + String(dist) + ",\\"light\\":" + String(ldr) +
+                ",\\"btn1\\":" + String(b1) + ",\\"btn2\\":" + String(b2) +
+                ",\\"btn3\\":" + String(b3) + "}";
   server.send(200, "application/json", json);
 }
 
@@ -153,14 +173,18 @@ void handleCommand() {
   sendCorsHeaders();
   if (server.method() == HTTP_OPTIONS) { server.send(204); return; }
   String body = server.arg("plain");
-  if (body.indexOf("RELAY_1_ON") >= 0) digitalWrite(2, HIGH);
-  if (body.indexOf("RELAY_1_OFF") >= 0) digitalWrite(2, LOW);
+  if (body.indexOf("RELAY_1_ON") >= 0 || body.indexOf("BUZZER_ON") >= 0) digitalWrite(BUZZER_PIN, HIGH);
+  if (body.indexOf("RELAY_1_OFF") >= 0 || body.indexOf("BUZZER_OFF") >= 0) digitalWrite(BUZZER_PIN, LOW);
   server.send(200, "application/json", "{\\"ok\\":true}");
 }
 
 void setup() {
   Serial.begin(115200);
-  pinMode(2, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(BTN1_PIN, INPUT_PULLUP);
+  pinMode(BTN2_PIN, INPUT_PULLUP);
+  pinMode(BTN3_PIN, INPUT_PULLUP);
+
   WiFi.begin(ssid, password);
   while (WiFi.status() != WL_CONNECTED) delay(500);
   Serial.println(WiFi.localIP()); // Use this IP in the app
@@ -173,6 +197,19 @@ void setup() {
 }
 
 void loop() {
+  unsigned long now = millis();
+  if (digitalRead(BTN1_PIN) == LOW && now > btn1LatchUntil) {
+    btn1LatchUntil = now + 1800;
+    Serial.println("BTN_1");
+  }
+  if (digitalRead(BTN2_PIN) == LOW && now > btn2LatchUntil) {
+    btn2LatchUntil = now + 1800;
+    Serial.println("BTN_2");
+  }
+  if (digitalRead(BTN3_PIN) == LOW && now > btn3LatchUntil) {
+    btn3LatchUntil = now + 1800;
+    Serial.println("BTN_3");
+  }
   server.handleClient();
 }`;
 

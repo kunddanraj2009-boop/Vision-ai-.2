@@ -5,8 +5,11 @@ import {
   BrowserHardwareMetrics,
 } from '../types/nancy';
 
+export type HardwarePushButtonNumber = 1 | 2 | 3;
+
 type TelemetryListener = (data: SensorData) => void;
 type LogListener = (log: string) => void;
+type PushButtonListener = (btn: HardwarePushButtonNumber, source: 'hardware' | 'ui') => void;
 
 class HardwareService {
   private state: HardwareState = {
@@ -46,6 +49,9 @@ class HardwareService {
 
   private telemetryListeners: Set<TelemetryListener> = new Set();
   private logListeners: Set<LogListener> = new Set();
+  private buttonListeners: Set<PushButtonListener> = new Set();
+  private lastButtonStates: Record<HardwarePushButtonNumber, boolean> = { 1: false, 2: false, 3: false };
+  private lastButtonTriggerTime: Record<HardwarePushButtonNumber, number> = { 1: 0, 2: 0, 3: 0 };
   private telemetryInterval: any = null;
   private wifiPollInterval: any = null;
   private serialPort: any = null;
@@ -100,6 +106,32 @@ class HardwareService {
     return () => {
       this.logListeners.delete(listener);
     };
+  }
+
+  public subscribePushButtons(listener: PushButtonListener) {
+    this.buttonListeners.add(listener);
+    return () => {
+      this.buttonListeners.delete(listener);
+    };
+  }
+
+  public triggerPushButton(btn: HardwarePushButtonNumber, source: 'hardware' | 'ui' = 'ui') {
+    const now = Date.now();
+    if (now - this.lastButtonTriggerTime[btn] < 700) {
+      return;
+    }
+    this.lastButtonTriggerTime[btn] = now;
+    const label = btn === 1 ? 'VOICE ON' : btn === 2 ? 'PERMISSION' : 'ALERT';
+    this.emitLog(`Push Button ${btn} (${label}) pressed [${source.toUpperCase()}]`);
+    this.buttonListeners.forEach((cb) => cb(btn, source));
+  }
+
+  private processPushButtonFlag(btn: HardwarePushButtonNumber, isPressed: boolean) {
+    const wasPressed = this.lastButtonStates[btn];
+    this.lastButtonStates[btn] = isPressed;
+    if (isPressed && !wasPressed) {
+      this.triggerPushButton(btn, 'hardware');
+    }
   }
 
   public emitLog(msg: string) {
@@ -369,6 +401,28 @@ class HardwareService {
           updated = true;
         }
 
+        const isTrueVal = (v: any) => v === true || v === 1 || v === '1' || String(v).toLowerCase() === 'true' || String(v).toLowerCase() === 'pressed';
+        const b1Raw = json.btn1 ?? json.button1 ?? json.push1 ?? json.p1;
+        const b2Raw = json.btn2 ?? json.button2 ?? json.push2 ?? json.p2;
+        const b3Raw = json.btn3 ?? json.button3 ?? json.push3 ?? json.p3;
+
+        if (b1Raw !== undefined) this.processPushButtonFlag(1, isTrueVal(b1Raw));
+        if (b2Raw !== undefined) this.processPushButtonFlag(2, isTrueVal(b2Raw));
+        if (b3Raw !== undefined) this.processPushButtonFlag(3, isTrueVal(b3Raw));
+
+        const singleBtn = toNum(json.btn ?? json.button ?? json.pushButton);
+        if (singleBtn === 1 || singleBtn === 2 || singleBtn === 3) {
+          this.triggerPushButton(singleBtn, 'hardware');
+        }
+        const evtStr = String(json.event ?? json.action ?? '').toUpperCase();
+        if (evtStr.includes('BTN_1') || evtStr.includes('BUTTON_1') || evtStr.includes('PUSH_1')) {
+          this.triggerPushButton(1, 'hardware');
+        } else if (evtStr.includes('BTN_2') || evtStr.includes('BUTTON_2') || evtStr.includes('PUSH_2')) {
+          this.triggerPushButton(2, 'hardware');
+        } else if (evtStr.includes('BTN_3') || evtStr.includes('BUTTON_3') || evtStr.includes('PUSH_3')) {
+          this.triggerPushButton(3, 'hardware');
+        }
+
         if (updated || Object.keys(json).length > 0) {
           this.sensorData.lastUpdated = new Date().toLocaleTimeString();
           this.sensorData.lastControllerRx = raw.slice(0, 180);
@@ -413,6 +467,15 @@ class HardwareService {
         }
         this.notifyTelemetry();
       }
+    }
+
+    const upperRaw = raw.trim().toUpperCase();
+    if (/^(BTN_?1|BUTTON_?1|PUSH_?1)(:1|=1)?$/.test(upperRaw)) {
+      this.triggerPushButton(1, 'hardware');
+    } else if (/^(BTN_?2|BUTTON_?2|PUSH_?2)(:1|=1)?$/.test(upperRaw)) {
+      this.triggerPushButton(2, 'hardware');
+    } else if (/^(BTN_?3|BUTTON_?3|PUSH_?3)(:1|=1)?$/.test(upperRaw)) {
+      this.triggerPushButton(3, 'hardware');
     }
   }
 

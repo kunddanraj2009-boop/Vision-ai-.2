@@ -595,6 +595,37 @@ export const DataDisplayView: React.FC<DataDisplayViewProps> = ({
             </div>
           </div>
         </div>
+        {/* 4. 3-Push Button Hardware Triggers */}
+        <div className="sm:col-span-2 p-3 rounded-2xl bg-slate-900/80 border border-cyan-500/25 space-y-2">
+          <div className="flex items-center justify-between border-b border-slate-800 pb-1.5">
+            <span className="text-cyan-300 font-bold text-[10px]">
+              {language === 'hi' ? '3-पुश बटन सिस्टम (ESP32 GPIO 12 / 13 / 14)' : '3-PUSH BUTTON SYSTEM (GPIO 12 / 13 / 14)'}
+            </span>
+          </div>
+          <div className="grid grid-cols-3 gap-2">
+            <button
+              type="button"
+              onClick={() => hardwareService.triggerPushButton(1, 'ui')}
+              className="py-2 rounded-lg bg-emerald-950/70 hover:bg-emerald-900 border border-emerald-500/50 text-emerald-300 text-[10px] font-bold cursor-pointer"
+            >
+              BTN 1: {language === 'hi' ? 'वॉइस ON' : 'VOICE ON'}
+            </button>
+            <button
+              type="button"
+              onClick={() => hardwareService.triggerPushButton(2, 'ui')}
+              className="py-2 rounded-lg bg-sky-950/70 hover:bg-sky-900 border border-sky-500/50 text-sky-300 text-[10px] font-bold cursor-pointer"
+            >
+              BTN 2: {language === 'hi' ? 'परमिशन' : 'PERMISSION'}
+            </button>
+            <button
+              type="button"
+              onClick={() => hardwareService.triggerPushButton(3, 'ui')}
+              className="py-2 rounded-lg bg-rose-950/70 hover:bg-rose-900 border border-rose-500/50 text-rose-300 text-[10px] font-bold cursor-pointer"
+            >
+              BTN 3: {language === 'hi' ? 'अलर्ट' : 'ALERT'}
+            </button>
+          </div>
+        </div>
       </div>
 
       {/* Latest Raw Controller Packet */}
