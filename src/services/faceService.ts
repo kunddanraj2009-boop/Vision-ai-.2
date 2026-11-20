@@ -92,30 +92,59 @@ class FaceIntelligenceManager {
       if (!res.ok) {
         throw new Error(`HTTP ${res.status} fetching face model`);
       }
+      const ctype = (res.headers.get('content-type') || '').toLowerCase();
+      if (ctype.includes('text/html') || ctype.includes('application/json')) {
+        throw new Error(`Invalid content-type (${ctype}) fetching face model`);
+      }
       const buf = await res.arrayBuffer();
+      if (buf.byteLength < 50000) {
+        throw new Error(`Face model payload too small (${buf.byteLength} bytes)`);
+      }
+      const head = new Uint8Array(buf.slice(0, 16));
+      if (head[0] === 0x3c) {
+        throw new Error('Received HTML instead of binary face model');
+      }
       return new Uint8Array(buf);
     } finally {
       clearTimeout(timer);
     }
   }
 
+  private async hasLocalWasmAssets(): Promise<boolean> {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 1800);
+      const res = await fetch('/mediapipe-wasm/vision_wasm_internal.js', { signal: controller.signal });
+      clearTimeout(timer);
+      if (!res.ok) return false;
+      const ctype = (res.headers.get('content-type') || '').toLowerCase();
+      if (ctype.includes('text/html')) return false;
+      const sample = await res.text();
+      return !sample.trimStart().startsWith('<');
+    } catch {
+      return false;
+    }
+  }
+
   private async getWasmFileset() {
     if (this.wasmCache) return this.wasmCache;
-    try {
-      this.wasmCache = await this.withTimeout(
-        FilesetResolver.forVisionTasks('/mediapipe-wasm'),
-        6000,
-        'Face WASM resolver'
-      );
-    } catch {
-      this.wasmCache = await this.withTimeout(
-        FilesetResolver.forVisionTasks(
-          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm'
-        ),
-        8000,
-        'Face CDN WASM resolver'
-      );
+    if (await this.hasLocalWasmAssets()) {
+      try {
+        this.wasmCache = await this.withTimeout(
+          FilesetResolver.forVisionTasks('/mediapipe-wasm'),
+          6000,
+          'Face WASM resolver'
+        );
+        return this.wasmCache;
+      } catch {}
     }
+    this.wasmCache = await this.withTimeout(
+      FilesetResolver.forVisionTasks(
+        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm'
+      ),
+      10000,
+      'Face CDN WASM resolver'
+    );
     return this.wasmCache;
   }
 
@@ -226,7 +255,8 @@ class FaceIntelligenceManager {
       try {
         const visionWasm = await this.getWasmFileset();
         const modelAssetPath =
-          this.resolvedModelPath || `${window.location.origin}/api/models/mediapipe/face_landmarker.task`;
+          this.resolvedModelPath ||
+          'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
         this.imageLandmarker = await this.withTimeout(
           FaceLandmarker.createFromOptions(visionWasm, {
             baseOptions: {

@@ -154,10 +154,10 @@ class SpeechService {
   }
 
   public isSpeechRecognitionAvailable(): boolean {
-    return Boolean(
-      typeof window !== 'undefined' &&
-      ((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition)
-    );
+    if (typeof window === 'undefined') return false;
+    const androidSpeech = (window as any).AndroidSpeech;
+    if (androidSpeech && typeof androidSpeech.start === 'function') return true;
+    return Boolean((window as any).SpeechRecognition || (window as any).webkitSpeechRecognition);
   }
 
   public isWakeModeActive(): boolean {
@@ -174,6 +174,38 @@ class SpeechService {
   }
 
   public startListening(): boolean {
+    if (typeof window !== 'undefined') {
+      const androidSpeech = (window as any).AndroidSpeech;
+      if (androidSpeech && typeof androidSpeech.start === 'function') {
+        try {
+          (window as any).__onAndroidSpeechResult = (text: string, isFinal: boolean) => {
+            if (this.isCurrentlySpeaking || Date.now() - this.lastSpokenTime < 900) return;
+            const clean = (text || '').trim();
+            if (!clean) return;
+            this.onTranscriptCallback?.(clean, Boolean(isFinal));
+            if (isFinal) {
+              this.isListening = false;
+              this.onStateChangeCallback?.('idle');
+              this.onCommandCallback?.(clean);
+            }
+          };
+          (window as any).__onAndroidSpeechEnd = () => {
+            this.isListening = false;
+            if (!this.isCurrentlySpeaking) {
+              this.onStateChangeCallback?.('idle');
+            }
+          };
+          androidSpeech.start(this.language === 'hi' ? 'hi-IN' : 'en-US');
+          this.isListening = true;
+          this.onStateChangeCallback?.('listening');
+          playAudioFx.click();
+          return true;
+        } catch (e) {
+          console.warn('AndroidSpeech start failed:', e);
+        }
+      }
+    }
+
     if (!this.recognition) {
       this.initRecognition();
       if (!this.recognition) return false;
@@ -189,6 +221,14 @@ class SpeechService {
   }
 
   public stopListening() {
+    if (typeof window !== 'undefined') {
+      const androidSpeech = (window as any).AndroidSpeech;
+      if (androidSpeech && typeof androidSpeech.stop === 'function') {
+        try {
+          androidSpeech.stop();
+        } catch {}
+      }
+    }
     if (this.recognition) {
       try {
         this.recognition.stop();
@@ -209,15 +249,6 @@ class SpeechService {
 
   public speak(text: string, onEnd?: () => void): Promise<void> {
     return new Promise((resolve) => {
-      if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
-        onEnd?.();
-        resolve();
-        return;
-      }
-
-      // Cancel previous utterance
-      window.speechSynthesis.cancel();
-
       // Clean speech text (strip markdown symbols like ** and #)
       const cleanText = text
         .replace(/[*#`_~]/g, '')
@@ -230,6 +261,55 @@ class SpeechService {
         resolve();
         return;
       }
+
+      if (typeof window !== 'undefined') {
+        const androidTts = (window as any).AndroidTTS;
+        if (androidTts && typeof androidTts.speak === 'function') {
+          let settled = false;
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            this.isCurrentlySpeaking = false;
+            this.lastSpokenTime = Date.now();
+            this.onStateChangeCallback?.('idle');
+            onEnd?.();
+            resolve();
+          };
+
+          const maxWaitMs = Math.min(20000, Math.max(3500, cleanText.length * 95));
+          const watchdog = setTimeout(finish, maxWaitMs);
+
+          (window as any).__onAndroidTtsDone = () => {
+            clearTimeout(watchdog);
+            finish();
+          };
+
+          try {
+            this.isCurrentlySpeaking = true;
+            this.onStateChangeCallback?.('speaking');
+            androidTts.speak(
+              cleanText,
+              this.language === 'hi' ? 'hi-IN' : 'en-US',
+              Number(this.voiceRate) || 1.0,
+              Number(this.voicePitch) || 1.05
+            );
+            return;
+          } catch (e) {
+            clearTimeout(watchdog);
+            this.isCurrentlySpeaking = false;
+            console.warn('AndroidTTS speak error:', e);
+          }
+        }
+      }
+
+      if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
+        onEnd?.();
+        resolve();
+        return;
+      }
+
+      // Cancel previous utterance
+      window.speechSynthesis.cancel();
 
       const utterance = new SpeechSynthesisUtterance(cleanText);
       utterance.volume = this.voiceVolume;
@@ -248,24 +328,27 @@ class SpeechService {
         }
       }
 
-      this.isCurrentlySpeaking = true;
-      this.onStateChangeCallback?.('speaking');
-
-      utterance.onend = () => {
+      let settled = false;
+      const maxWaitMs = Math.min(20000, Math.max(3500, cleanText.length * 95));
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(watchdog);
         this.isCurrentlySpeaking = false;
         this.lastSpokenTime = Date.now();
         this.onStateChangeCallback?.('idle');
         onEnd?.();
         resolve();
       };
+      const watchdog = setTimeout(finish, maxWaitMs);
 
+      this.isCurrentlySpeaking = true;
+      this.onStateChangeCallback?.('speaking');
+
+      utterance.onend = finish;
       utterance.onerror = (e) => {
-        this.isCurrentlySpeaking = false;
-        this.lastSpokenTime = Date.now();
         console.warn('Speech synthesis error:', e);
-        this.onStateChangeCallback?.('idle');
-        onEnd?.();
-        resolve();
+        finish();
       };
 
       window.speechSynthesis.speak(utterance);
@@ -275,6 +358,14 @@ class SpeechService {
   public stopSpeaking() {
     this.isCurrentlySpeaking = false;
     this.lastSpokenTime = Date.now();
+    if (typeof window !== 'undefined') {
+      const androidTts = (window as any).AndroidTTS;
+      if (androidTts && typeof androidTts.stop === 'function') {
+        try {
+          androidTts.stop();
+        } catch {}
+      }
+    }
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       window.speechSynthesis.cancel();
       this.onStateChangeCallback?.('idle');

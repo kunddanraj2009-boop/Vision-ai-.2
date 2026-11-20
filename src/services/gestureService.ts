@@ -215,10 +215,37 @@ class GestureRecognitionManager {
       if (!res.ok) {
         throw new Error(`HTTP ${res.status} fetching model`);
       }
+      const ctype = (res.headers.get('content-type') || '').toLowerCase();
+      if (ctype.includes('text/html') || ctype.includes('application/json')) {
+        throw new Error(`Invalid content-type (${ctype}) fetching model`);
+      }
       const buf = await res.arrayBuffer();
+      if (buf.byteLength < 50000) {
+        throw new Error(`Gesture model payload too small (${buf.byteLength} bytes)`);
+      }
+      const head = new Uint8Array(buf.slice(0, 16));
+      if (head[0] === 0x3c) {
+        throw new Error('Received HTML instead of binary gesture model');
+      }
       return new Uint8Array(buf);
     } finally {
       clearTimeout(timer);
+    }
+  }
+
+  private async hasLocalWasmAssets(): Promise<boolean> {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 1800);
+      const res = await fetch('/mediapipe-wasm/vision_wasm_internal.js', { signal: controller.signal });
+      clearTimeout(timer);
+      if (!res.ok) return false;
+      const ctype = (res.headers.get('content-type') || '').toLowerCase();
+      if (ctype.includes('text/html')) return false;
+      const sample = await res.text();
+      return !sample.trimStart().startsWith('<');
+    } catch {
+      return false;
     }
   }
 
@@ -241,19 +268,24 @@ class GestureRecognitionManager {
 
     this.loadPromise = (async () => {
       try {
-        let visionWasm;
-        try {
-          visionWasm = await this.withTimeout(
-            FilesetResolver.forVisionTasks('/mediapipe-wasm'),
-            6000,
-            'WASM resolver'
-          );
-        } catch {
+        let visionWasm = null;
+        if (await this.hasLocalWasmAssets()) {
+          try {
+            visionWasm = await this.withTimeout(
+              FilesetResolver.forVisionTasks('/mediapipe-wasm'),
+              6000,
+              'WASM resolver'
+            );
+          } catch {
+            visionWasm = null;
+          }
+        }
+        if (!visionWasm) {
           visionWasm = await this.withTimeout(
             FilesetResolver.forVisionTasks(
               'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm'
             ),
-            8000,
+            10000,
             'CDN WASM resolver'
           );
         }
